@@ -1,0 +1,98 @@
+# docker-compose.yml
+#
+# Profiles:
+#   dev   — hot-reload server + client dev server + Redis
+#   prod  — pre-built server + Redis
+#
+# Usage:
+#   Development:  docker compose --profile dev up
+#   Production:   CORS_ORIGIN=https://yourdomain.com docker compose --profile prod up -d
+#
+# Scaling (horizontal, requires Redis):
+#   docker compose --profile prod up --scale server=3 -d
+#   (put nginx or Caddy in front as the WS-aware load balancer)
+
+version: '3.9'
+
+services:
+  # ── Redis (shared by all server instances for pub/sub relay) ──────────
+  redis:
+    image: redis:7-alpine
+    profiles: [dev, prod]
+    command: redis-server --save "" --appendonly no --maxmemory 128mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Server (production build) ─────────────────────────────────────────
+  server:
+    profiles: [prod]
+    build:
+      context: .
+      target: production
+    ports:
+      - "3001:3001"
+    volumes:
+      - crdt-data:/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_PATH=/data/data.db
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required in production}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Server (dev, bind-mounted source) ────────────────────────────────
+  server-dev:
+    profiles: [dev]
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install --ignore-scripts && npm run dev:server"
+    ports:
+      - "3001:3001"
+    volumes:
+      - .:/app
+      - crdt-data:/data
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - DB_PATH=/data/data.db
+      - CORS_ORIGIN=http://localhost:5173
+      - JWT_SECRET=dev-secret-not-for-production
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Client (dev, Vite HMR) ────────────────────────────────────────────
+  client-dev:
+    profiles: [dev]
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install --ignore-scripts && npm run dev:client"
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - VITE_WS_URL=ws://localhost:3001
+      - VITE_API_URL=http://localhost:3001
+
+volumes:
+  crdt-data:
