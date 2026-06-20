@@ -1,0 +1,25 @@
+{
+  "name": "confluence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Distributed real-time collaborative editor using RGA CRDT",
+  "workspaces": [
+    "packages/crdt-core",
+    "packages/server",
+    "packages/client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm run dev --workspace=packages/server",
+    "dev:client": "npm run dev --workspace=packages/client",
+    "build": "npm run build --workspace=packages/crdt-core && npm run build --workspace=packages/server && npm run build --workspace=packages/client",
+    "start": "node packages/server/dist/index.js",
+    "test": "npm test --workspace=packages/crdt-core",
+    "clean": "rimraf packages/crdt-core/dist packages/server/dist packages/client/dist data.db"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.4.5"
+  }
+}
