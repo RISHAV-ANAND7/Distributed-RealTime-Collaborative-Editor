@@ -11,8 +11,7 @@
  */
 
 import type { Database } from 'sqlite';
-import type { Response, NextFunction } from 'express';
-import type { AuthRequest } from './auth.js';
+import type { Request, Response, NextFunction } from 'express';
 
 export type Role = 'owner' | 'editor' | 'viewer' | 'pending';
 
@@ -106,7 +105,7 @@ export async function listMembers(
 // ---------------------------------------------------------------------------
 
 export function requireDocRole(getDb: () => Database, minRole: Role) {
-  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const db = getDb();
     const docId = req.params['id'];
     const userId = req.user!.sub;
@@ -120,7 +119,7 @@ export function requireDocRole(getDb: () => Database, minRole: Role) {
       res.status(403).json({ error: `Requires ${minRole} role` });
       return;
     }
-    (req as AuthRequest & { docRole: Role }).docRole = role;
+    (req as Request & { docRole: Role }).docRole = role;
     next();
   };
 }

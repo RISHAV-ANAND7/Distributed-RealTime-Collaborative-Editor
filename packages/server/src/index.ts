@@ -32,6 +32,7 @@ import {
   requireAuth,
   optionalAuth,
   extractWsToken,
+  createWsTicket,
   type AuthRequest,
 } from './auth.js';
 import {
@@ -153,8 +154,9 @@ app.post('/auth/register', authLimiter, async (req, res) => {
   if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
     return void res.status(400).json({ error: 'username may only contain letters, numbers, _ and -' });
   }
-  if (typeof password !== 'string' || password.length < 8) {
-    return void res.status(400).json({ error: 'password must be at least 8 characters' });
+  // Enforce max length to prevent PBKDF2 CPU-exhaustion via huge inputs.
+  if (typeof password !== 'string' || password.length < 8 || password.length > 1024) {
+    return void res.status(400).json({ error: 'password must be 8–1024 characters' });
   }
   const existing = await getUserByUsername(username);
   if (existing) return void res.status(409).json({ error: 'Username already taken' });
@@ -181,8 +183,20 @@ app.post('/auth/login', authLimiter, async (req, res) => {
   res.json({ token, user: { id: user.id, username: user.username } });
 });
 
-app.get('/auth/me', requireAuth as any, (req: AuthRequest, res) => {
+app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id: req.user!.sub, username: req.user!.username } });
+});
+
+/**
+ * POST /auth/ws-ticket
+ * Authenticated users call this endpoint to get a short-lived (30 s) opaque
+ * ticket. The ticket is then passed as ?ticket= in the WebSocket URL instead
+ * of the raw JWT — preventing the JWT from appearing in server access logs,
+ * browser history, and nginx proxy logs.
+ */
+app.post('/auth/ws-ticket', requireAuth, (req, res) => {
+  const ticket = createWsTicket(req.user!);
+  res.json({ ticket, expiresInMs: 30_000 });
 });
 
 // ---------------------------------------------------------------------------
@@ -194,7 +208,7 @@ app.get('/auth/me', requireAuth as any, (req: AuthRequest, res) => {
  * Unauthenticated requests receive an empty list (or 401 — choose per product needs;
  * here we return 401 to enforce login before listing).
  */
-app.get('/documents', requireAuth as any, async (req: AuthRequest, res) => {
+app.get('/documents', requireAuth, async (req, res) => {
   const docIds = await getDocumentIdsForUser(getDb(), req.user!.sub);
   const list = docIds
     .map((id) => rooms.get(id))
@@ -204,7 +218,7 @@ app.get('/documents', requireAuth as any, async (req: AuthRequest, res) => {
   res.json(list);
 });
 
-app.post('/documents', requireAuth as any, async (req: AuthRequest, res) => {
+app.post('/documents', requireAuth, async (req, res) => {
   const rawTitle = (req.body?.title as string | undefined)?.trim() ?? '';
   const title = rawTitle.slice(0, 120) || 'Untitled document';
   const id = randomUUID().slice(0, 8);
@@ -219,7 +233,7 @@ app.post('/documents', requireAuth as any, async (req: AuthRequest, res) => {
   res.status(201).json(room.toSummary());
 });
 
-app.get('/documents/:id', requireAuth as any, async (req: AuthRequest, res) => {
+app.get('/documents/:id', requireAuth, async (req, res) => {
   const role = await getUserRole(getDb(), req.params['id'], req.user!.sub);
   if (!role) return void res.status(403).json({ error: 'Access denied' });
   const room = rooms.get(req.params['id']);
@@ -233,9 +247,9 @@ app.get('/documents/:id', requireAuth as any, async (req: AuthRequest, res) => {
  */
 app.patch(
   '/documents/:id',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const room = rooms.get(req.params['id']);
     if (!room) return void res.status(404).json({ error: 'Not found' });
     const rawTitle = (req.body?.title as string | undefined)?.trim() ?? '';
@@ -248,9 +262,9 @@ app.patch(
 
 app.delete(
   '/documents/:id',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const id = req.params['id'];
     rooms.delete(id);
     unregisterRoom(id);
@@ -263,7 +277,7 @@ app.delete(
 // Permission management
 // ---------------------------------------------------------------------------
 
-app.get('/documents/:id/members', requireAuth as any, async (req: AuthRequest, res) => {
+app.get('/documents/:id/members', requireAuth, async (req, res) => {
   const role = await getUserRole(getDb(), req.params['id'], req.user!.sub);
   if (!role) return void res.status(403).json({ error: 'Access denied' });
   const members = await listMembers(getDb(), req.params['id']);
@@ -272,9 +286,9 @@ app.get('/documents/:id/members', requireAuth as any, async (req: AuthRequest, r
 
 app.put(
   '/documents/:id/members/:userId',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const { role } = req.body ?? {};
     if (!['owner', 'editor', 'viewer'].includes(role)) {
       return void res.status(400).json({ error: 'role must be owner, editor, or viewer' });
@@ -286,9 +300,9 @@ app.put(
 
 app.delete(
   '/documents/:id/members/:userId',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     if (req.params['userId'] === req.user!.sub) {
       return void res.status(400).json({ error: 'Cannot revoke your own owner access' });
     }
@@ -306,7 +320,7 @@ app.delete(
  * Any authenticated user can look up whether a username exists.
  * Returns { id, username } — no sensitive data exposed.
  */
-app.get('/users/lookup', requireAuth as any, async (req: AuthRequest, res) => {
+app.get('/users/lookup', requireAuth, async (req, res) => {
   const username = (req.query['username'] as string | undefined)?.trim();
   if (!username || username.length < 1) {
     return void res.status(400).json({ error: 'username query param required' });
@@ -324,9 +338,9 @@ app.get('/users/lookup', requireAuth as any, async (req: AuthRequest, res) => {
  */
 app.post(
   '/documents/:id/invite',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const { username, role } = req.body ?? {};
     if (typeof username !== 'string' || !username.trim()) {
       return void res.status(400).json({ error: 'username required' });
@@ -353,9 +367,9 @@ app.post(
 /** GET /documents/:id/pending — list users waiting in the waiting room */
 app.get(
   '/documents/:id/pending',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const room = rooms.get(req.params['id']);
     if (!room) return void res.json([]);
     res.json(room.getPendingUsers());
@@ -365,9 +379,9 @@ app.get(
 /** POST /documents/:id/approve — owner approves a waiting user */
 app.post(
   '/documents/:id/approve',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const { userId, role } = req.body ?? {};
     if (!userId || typeof userId !== 'string') {
       return void res.status(400).json({ error: 'userId required' });
@@ -375,9 +389,11 @@ app.post(
     if (!['editor', 'viewer'].includes(role)) {
       return void res.status(400).json({ error: 'role must be editor or viewer' });
     }
-    // Persist the permission in the database
+    // Persist the permission in the database first.
+    // If the user has already disconnected the in-memory wakeup is a no-op,
+    // but they will reconnect with the correct role from the DB.
     await grantPermission(getDb(), req.params['id'], userId, role as Role);
-    // Wake up the pending WebSocket client
+    // Wake up the pending WebSocket client (if still connected).
     const room = rooms.get(req.params['id']);
     if (room) {
       await room.approvePending(userId, role as 'editor' | 'viewer');
@@ -389,9 +405,9 @@ app.post(
 /** POST /documents/:id/reject — owner rejects a waiting user */
 app.post(
   '/documents/:id/reject',
-  requireAuth as any,
-  requireDocRole(getDb, 'owner') as any,
-  async (req: AuthRequest, res) => {
+  requireAuth,
+  requireDocRole(getDb, 'owner'),
+  async (req, res) => {
     const { userId } = req.body ?? {};
     if (!userId || typeof userId !== 'string') {
       return void res.status(400).json({ error: 'userId required' });
@@ -408,7 +424,7 @@ app.post(
 // Version history
 // ---------------------------------------------------------------------------
 
-app.get('/documents/:id/history', requireAuth as any, async (req: AuthRequest, res) => {
+app.get('/documents/:id/history', requireAuth, async (req, res) => {
   const role = await getUserRole(getDb(), req.params['id'], req.user!.sub);
   if (!role) return void res.status(403).json({ error: 'Access denied' });
   const [stats, checkpoints] = await Promise.all([
@@ -418,7 +434,7 @@ app.get('/documents/:id/history', requireAuth as any, async (req: AuthRequest, r
   res.json({ stats, checkpoints });
 });
 
-app.get('/documents/:id/history/replay', requireAuth as any, async (req: AuthRequest, res) => {
+app.get('/documents/:id/history/replay', requireAuth, async (req, res) => {
   const role = await getUserRole(getDb(), req.params['id'], req.user!.sub);
   if (!role) return void res.status(403).json({ error: 'Access denied' });
   const afterSeq = Math.max(0, Number(req.query['seq'] ?? 0));
@@ -473,7 +489,11 @@ wss.on('connection', async (socket: WebSocket, req: http.IncomingMessage, docId:
 
   const room = await getOrCreateRoom(docId);
   const authUsername = jwtPayload?.username ?? null;
-  const displayName = params.get('name') ?? null;  // per-session nickname from JoinModal
+  // Sanitize displayName: cap length and strip control characters.
+  const rawDisplayName = params.get('name') ?? null;
+  const displayName = rawDisplayName
+    ? rawDisplayName.replace(/[\x00-\x1f]/g, '').slice(0, 64)
+    : null;
   const attached = await room.addClient(socket, userId, role, lastSeq, authUsername, displayName);
 
   const MAX_MSG_BYTES = 4096;
@@ -513,3 +533,23 @@ bootstrap().then(() => {
   console.error('[server] Bootstrap failed:', err);
   process.exit(1);
 });
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+
+async function shutdown(signal: string): Promise<void> {
+  console.log(`[server] Received ${signal} — shutting down gracefully…`);
+  server.close(async () => {
+    // Allow the debounced queuePersist callbacks (500 ms) to fire.
+    await new Promise<void>((r) => setTimeout(r, 600));
+    await import('./relay.js').then((m) => m.closeRelay()).catch(() => {});
+    console.log('[server] Shutdown complete.');
+    process.exit(0);
+  });
+  // Force-exit after 10 s if something hangs.
+  setTimeout(() => { console.error('[server] Forced exit after timeout.'); process.exit(1); }, 10_000).unref();
+}
+
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT',  () => void shutdown('SIGINT'));

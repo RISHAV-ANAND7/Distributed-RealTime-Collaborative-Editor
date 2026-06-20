@@ -45,6 +45,13 @@ export async function initStorage(): Promise<Database> {
   const dbPath = process.env.DB_PATH ?? path.resolve(process.cwd(), 'data.db');
   db = await open({ filename: dbPath, driver: sqlite3.Database });
 
+  // Set PRAGMAs before DDL so they apply to this connection from the start.
+  // WAL mode improves concurrent read performance.
+  // foreign_keys must be set per-connection (not persisted in the DB file).
+  await db.exec('PRAGMA journal_mode=WAL');
+  await db.exec('PRAGMA synchronous=NORMAL');
+  await db.exec('PRAGMA foreign_keys=ON');
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS documents (
       id              TEXT PRIMARY KEY,
@@ -102,10 +109,6 @@ export async function initStorage(): Promise<Database> {
     CREATE INDEX IF NOT EXISTS idx_ops_doc_seq    ON document_ops(doc_id, seq);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_opid ON document_ops(operation_id);
   `);
-
-  await db.exec('PRAGMA journal_mode=WAL');
-  await db.exec('PRAGMA synchronous=NORMAL');
-  await db.exec('PRAGMA foreign_keys=ON');
 
   return db;
 }
@@ -339,18 +342,33 @@ export async function getOpStats(docId: string): Promise<{
   };
 }
 
+/**
+ * Return evenly-spaced checkpoint ops for version history display.
+ *
+ * AUDIT FIX: Replaced the fragile `id % (COUNT/limit) = 0` integer-division
+ * sampling (which could return 0 rows when COUNT < limit, or uneven samples)
+ * with a ROW_NUMBER() OVER approach that gives exactly `limit` evenly-spaced
+ * rows regardless of document size.
+ */
 export async function getVersionCheckpoints(docId: string, limit = 50): Promise<OpLogEntry[]> {
   const d = await initStorage();
   const rows = await d.all<Array<{
     id: number; doc_id: string; operation_id: string; op_type: string; op_json: string;
     user_id: string | null; site_id: string; seq: number; applied_at: number;
   }>>(
-    `SELECT id, doc_id, operation_id, op_type, op_json, user_id, site_id, seq, applied_at
-     FROM document_ops
-     WHERE doc_id = ?
-       AND id % MAX(1, (SELECT COUNT(*)/? FROM document_ops WHERE doc_id = ?)) = 0
-     ORDER BY seq ASC LIMIT ?`,
-    docId, limit, docId, limit,
+    `WITH numbered AS (
+       SELECT id, doc_id, operation_id, op_type, op_json, user_id, site_id, seq, applied_at,
+              ROW_NUMBER() OVER (ORDER BY seq ASC) AS rn,
+              COUNT(*) OVER ()                     AS total
+       FROM document_ops
+       WHERE doc_id = ?
+     )
+     SELECT id, doc_id, operation_id, op_type, op_json, user_id, site_id, seq, applied_at
+     FROM numbered
+     WHERE total <= ? OR (rn - 1) % MAX(1, (total / ?)) = 0
+     ORDER BY seq ASC
+     LIMIT ?`,
+    docId, limit, limit, limit,
   );
   return rows.map((r) => ({
     id: r.id,

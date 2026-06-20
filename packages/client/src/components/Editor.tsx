@@ -112,6 +112,13 @@ export function Editor({ docId, onTitleResolved }: EditorProps) {
   const sendRef        = useRef<((p: unknown) => boolean) | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef    = useRef(false);
+  /**
+   * Tracks the last confirmed server seq number.
+   * Passed to useWebSocket so reconnect URLs include ?lastSeq=N, enabling
+   * the server's delta-sync path to send only missed ops instead of a full
+   * snapshot (bandwidth-efficient reconnect).
+   */
+  const lastSeqRef = useRef<number>(0);
 
   const [hydrated, setHydrated]             = useState(false);
   const [charCount, setCharCount]           = useState(0);
@@ -164,6 +171,8 @@ export function Editor({ docId, onTitleResolved }: EditorProps) {
           sequence: (msg.sequence ?? []) as CRDTChar[],
           clock: msg.clock ?? 0,
         });
+        // Track seq for delta-sync on reconnect.
+        if (typeof msg.seq === 'number') lastSeqRef.current = msg.seq;
         if (msg.title) onTitleResolved?.(msg.title);
         const ed = editorRef.current;
         if (ed) {
@@ -264,7 +273,8 @@ export function Editor({ docId, onTitleResolved }: EditorProps) {
   const { status, send, queueLength } = useWebSocket({
     url: wsUrl ?? '',
     onMessage: handleMessage,
-    enabled: joined,  // don't connect until user has joined
+    enabled: joined,   // don't connect until user has joined
+    lastSeqRef,        // enables delta-sync on reconnect
   });
   useEffect(() => { sendRef.current = send; }, [send]);
 
@@ -299,6 +309,13 @@ export function Editor({ docId, onTitleResolved }: EditorProps) {
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current  = editor;
     monacoRef.current  = monaco;
+
+    // Use ResizeObserver for responsive layout instead of Monaco's built-in
+    // automaticLayout polling (which fires every ~100 ms regardless of changes).
+    const container = editor.getContainerDomNode();
+    const resizeObserver = new ResizeObserver(() => editor.layout());
+    resizeObserver.observe(container);
+    editor.onDidDispose(() => resizeObserver.disconnect());
 
     editor.onDidChangeCursorPosition((e) => {
       const model = editor.getModel();
@@ -649,7 +666,8 @@ export function Editor({ docId, onTitleResolved }: EditorProps) {
                 padding:               { top: 20, bottom: 20 },
                 scrollBeyondLastLine:  false,
                 renderLineHighlight:   'gutter',
-                automaticLayout:       true,
+                // automaticLayout disabled: layout handled by ResizeObserver in onMount.
+                automaticLayout:       false,
                 smoothScrolling:       true,
                 cursorBlinking:        'smooth',
                 cursorSmoothCaretAnimation: 'on',
@@ -689,6 +707,29 @@ function slug(s: string): string {
 }
 
 let injectedStyle: HTMLStyleElement | null = null;
+
+/**
+ * Sanitize a user-provided color for safe use in CSS property values.
+ * Only allows #rrggbb hex colors (the format the server enforces).
+ * Falls back to a neutral gray if the value is invalid.
+ */
+function sanitizeCssColor(color: string): string {
+  return /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#888888';
+}
+
+/**
+ * Sanitize a display name for use inside a CSS `content: "..."` string.
+ *
+ * Within a CSS string literal the only characters that can break out of the
+ * string are `"` (close the string) and `\` (escape sequence). Stripping
+ * those — plus control characters — is sufficient to prevent CSS injection
+ * via the content property. The server applies the same sanitization, but
+ * this client-side check acts as defense-in-depth.
+ */
+function sanitizeCssName(name: string): string {
+  return name.replace(/[\x00-\x1f"\\<>{}]/g, '').slice(0, 40);
+}
+
 function ensureCursorStyles(users: { siteId: string; color: string; name: string }[]) {
   if (typeof document === 'undefined') return;
   if (!injectedStyle) {
@@ -697,13 +738,14 @@ function ensureCursorStyles(users: { siteId: string; color: string; name: string
     document.head.appendChild(injectedStyle);
   }
   injectedStyle.textContent = users.map(({ siteId, color, name }) => {
-    const id = slug(siteId);
-    const safeName = name.replace(/["\\]/g, '');
+    const id       = slug(siteId);
+    const safeColor = sanitizeCssColor(color);
+    const safeName  = sanitizeCssName(name);
     return `
-      .rc-cursor-${id} { border-left: 2px solid ${color}; margin-left: -1px; }
+      .rc-cursor-${id} { border-left: 2px solid ${safeColor}; margin-left: -1px; }
       .rc-label-${id}::before {
         content: "${safeName}";
-        background: ${color};
+        background: ${safeColor};
         color: #0a0c12;
         font-size: 10px;
         font-weight: 700;

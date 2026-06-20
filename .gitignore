@@ -11,6 +11,10 @@ data.db
 data.db-wal
 data.db-shm
 /data/
+# SQLite DB files nested inside packages (e.g. packages/server/data.db)
+**/data.db
+**/data.db-wal
+**/data.db-shm
 
 # Environment
 .env

@@ -61,7 +61,7 @@ function readStored(): { token: string | null; user: User | null } {
   }
 }
 
-export function createAuthState(): AuthContextType {
+export function useAuthState(): AuthContextType {
   const stored = readStored();
   const [state, setState] = useState<AuthState>({
     user: stored.user,

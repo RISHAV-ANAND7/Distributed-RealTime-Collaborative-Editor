@@ -102,8 +102,14 @@ export class DocumentRoom {
   /**
    * In-memory idempotency set: operationIds applied this session.
    * Guards against duplicates from client offline queues and Redis re-delivery.
+   *
+   * AUDIT FIX: capped at MAX_APPLIED_OPS to prevent unbounded memory growth
+   * on long-running rooms. Sets preserve insertion order, so we evict the
+   * oldest entry once the cap is exceeded. The DB's UNIQUE constraint on
+   * operation_id remains the authoritative dedup guarantee.
    */
   private appliedOps: Set<string> = new Set();
+  private static readonly MAX_APPLIED_OPS = 10_000;
 
   constructor(
     id: string,
@@ -291,6 +297,10 @@ export class DocumentRoom {
     // In-memory dedup (fast path — avoids DB round-trip for same session).
     if (this.appliedOps.has(operationId)) return false;
     this.appliedOps.add(operationId);
+    // Prune oldest entry if cap exceeded (FIFO — Set preserves insertion order).
+    if (this.appliedOps.size > DocumentRoom.MAX_APPLIED_OPS) {
+      this.appliedOps.delete(this.appliedOps.values().next().value!);
+    }
 
     // Apply to local RGA.
     this.rga.applyRemote(wireOp);
@@ -328,14 +338,44 @@ export class DocumentRoom {
     if (typeof msg.siteId !== 'string') return;
     if (typeof msg.position !== 'number' || msg.position < 0) return;
     from.siteId = msg.siteId;
-    this.broadcast(JSON.stringify(msg), from);
+    // Sanitize user-controlled fields before broadcasting to all clients.
+    // name is used in CSS content: "..." on the client — strip control chars.
+    // color must be a valid hex colour to prevent CSS property injection.
+    const safeName = typeof msg.name === 'string'
+      ? msg.name.replace(/[\x00-\x1f"\\]/g, '').slice(0, 64)
+      : undefined;
+    const safeColor = typeof msg.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(msg.color)
+      ? msg.color
+      : undefined;
+    const sanitized: CursorMessage = {
+      type: 'cursor',
+      siteId: msg.siteId,
+      position: msg.position,
+      typing: !!msg.typing,
+      ...(safeName  !== undefined && { name:  safeName  }),
+      ...(safeColor !== undefined && { color: safeColor }),
+    };
+    this.broadcast(JSON.stringify(sanitized), from);
   }
 
   handleHeartbeat(msg: HeartbeatMessage, from: AttachedSocket): void {
     if (typeof msg.siteId !== 'string') return;
     from.siteId = msg.siteId;
+    // Sanitize name and color for the same CSS-injection reasons as cursor.
+    const safeName = typeof msg.name === 'string'
+      ? msg.name.replace(/[\x00-\x1f"\\]/g, '').slice(0, 64)
+      : undefined;
+    const safeColor = typeof msg.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(msg.color)
+      ? msg.color
+      : undefined;
+    const sanitized: HeartbeatMessage = {
+      type: 'heartbeat',
+      siteId: msg.siteId,
+      ...(safeName  !== undefined && { name:  safeName  }),
+      ...(safeColor !== undefined && { color: safeColor }),
+    };
     // Broadcast heartbeat so all peers can refresh lastSeen
-    this.broadcast(JSON.stringify(msg), from);
+    this.broadcast(JSON.stringify(sanitized), from);
   }
 
   /**
@@ -354,9 +394,12 @@ export class DocumentRoom {
 
       const operationId = op.operationId ?? randomUUID();
 
-      // Idempotency guard.
+      // In-memory dedup (fast path — avoids DB round-trip for same session).
       if (this.appliedOps.has(operationId)) return;
       this.appliedOps.add(operationId);
+      if (this.appliedOps.size > DocumentRoom.MAX_APPLIED_OPS) {
+        this.appliedOps.delete(this.appliedOps.values().next().value!);
+      }
 
       // Apply to local RGA so this instance's state stays consistent.
       this.rga.applyRemote(op);

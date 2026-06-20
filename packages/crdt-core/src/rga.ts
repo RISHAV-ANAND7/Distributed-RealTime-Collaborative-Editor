@@ -193,15 +193,27 @@ export class RGA {
   /**
    * AUDIT FIX #3: O(b) drain via parent-indexed fan-out instead of O(b²)
    * repeated full-backlog scans.
+   *
+   * AUDIT FIX (dedup): replaced O(n) `queue.includes(op)` with an O(1)
+   * Set membership check to avoid re-introducing quadratic behaviour.
    */
   private drainBacklog(events: RemoteOperationEvent[]): void {
     // Use a BFS queue seeded by all newly unblocked ops.
     const queue: InsertOp[] = [];
+    // O(1) membership guard — avoids the O(n) queue.includes() anti-pattern.
+    const queued = new Set<InsertOp>();
+
+    const enqueue = (op: InsertOp) => {
+      if (!queued.has(op)) {
+        queue.push(op);
+        queued.add(op);
+      }
+    };
 
     // Collect ops whose parent is now known (or ROOT) from the backlog index.
     for (const [parentKey, ops] of this.backlogByParent.entries()) {
       if (parentKey === 'ROOT' || this.indexById.has(parentKey)) {
-        queue.push(...ops);
+        for (const op of ops) enqueue(op);
         this.backlogByParent.delete(parentKey);
       }
     }
@@ -211,7 +223,7 @@ export class RGA {
       const pk = op.parentId === null ? 'ROOT' : charIdKey(op.parentId);
       if (this.indexById.has(charIdKey(op.id))) continue; // already applied
       if (op.parentId === null || this.indexById.has(pk)) {
-        if (!queue.includes(op)) queue.push(op);
+        enqueue(op);
       } else {
         remaining.push(op);
       }
@@ -227,7 +239,7 @@ export class RGA {
       const newKey = charIdKey(op.id);
       const waiting = this.backlogByParent.get(newKey);
       if (waiting) {
-        queue.push(...waiting);
+        for (const w of waiting) enqueue(w);
         this.backlogByParent.delete(newKey);
       }
     }
@@ -263,7 +275,6 @@ export class RGA {
   }
 
   /**
-  /**
    * Returns true if `char` is a descendant of `ancestorId`.
    *
    * Fix: removed the MAX_HOPS=64 limit which caused convergence failure on
@@ -289,9 +300,11 @@ export class RGA {
   }
 
   /**
-   * AUDIT FIX #1: O(n) index rebuild reduced to O(n) on first build and
-   * O(n) on insert (unavoidable due to splice shifting), but we avoid
-   * redundant full-table scans elsewhere with the Fenwick tree.
+   * AUDIT FIX #1: O(n) index rebuild (unavoidable due to splice shifting).
+   *
+   * AUDIT FIX (Fenwick rebuild): The previous rebuild called fenwickUpdate()
+   * for every non-tombstoned element, making construction O(n log n). We now
+   * use the standard O(n) bottom-up Fenwick construction instead.
    */
   private spliceInsert(rawIndex: number, char: CRDTChar): void {
     this.sequence.splice(rawIndex, 0, char);
@@ -299,12 +312,17 @@ export class RGA {
     for (let i = rawIndex; i < this.sequence.length; i++) {
       this.indexById.set(charIdKey(this.sequence[i].id), i);
     }
-    // Rebuild Fenwick tree with new slot.
-    this.fenwick.splice(rawIndex, 0, 0);
-    // Recompute the entire Fenwick structure after splice (cheapest correct approach).
-    this.fenwick = new Array(this.sequence.length + 1).fill(0);
-    for (let i = 0; i < this.sequence.length; i++) {
-      if (!this.sequence[i].tombstone) this.fenwickUpdate(i, 1);
+    // O(n) Fenwick tree construction (bottom-up).
+    // Standard algorithm: propagate each cell's value to its parent in one pass.
+    const n = this.sequence.length;
+    this.fenwick = new Array(n + 1).fill(0);
+    for (let i = 0; i < n; i++) {
+      if (!this.sequence[i].tombstone) {
+        const j = i + 1; // 1-indexed
+        this.fenwick[j] += 1;
+        const parent = j + (j & -j);
+        if (parent <= n) this.fenwick[parent] += this.fenwick[j];
+      }
     }
   }
 

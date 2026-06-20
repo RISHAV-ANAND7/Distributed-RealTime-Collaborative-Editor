@@ -1,10 +1,10 @@
 import { Routes, Route } from 'react-router-dom';
-import { AuthContext, createAuthState } from './hooks/useAuth';
+import { AuthContext, useAuthState } from './hooks/useAuth';
 import { DocumentList } from './components/DocumentList';
 import { EditorPage } from './components/EditorPage';
 
 function AuthProvider({ children }: { children: React.ReactNode }) {
-  const authState = createAuthState();
+  const authState = useAuthState();
   return (
     <AuthContext.Provider value={authState}>
       {children}
