@@ -1,14 +1,3 @@
-/**
- * permissions.ts — per-document role-based access control
- *
- * Roles (ordered by privilege):
- *   owner  — full control: read, write, rename, delete, manage members
- *   editor — read + write
- *   viewer — read-only (cannot send insert/delete ops)
- *
- * Database tables (created in storage.ts):
- *   document_permissions (doc_id, user_id, role, granted_at)
- */
 
 import type { Database } from 'sqlite';
 import type { Request, Response, NextFunction } from 'express';
@@ -95,14 +84,6 @@ export async function listMembers(
   }));
 }
 
-// ---------------------------------------------------------------------------
-// Express middleware factory
-//
-// requireDocRole(getDb, minRole) — takes a *getter* function instead of a
-// direct Database reference. This defers resolution until request time so
-// the middleware can be registered at module-load time (when storageDb is
-// still null!) and still receive the fully-initialised db at runtime.
-// ---------------------------------------------------------------------------
 
 export function requireDocRole(getDb: () => Database, minRole: Role) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {

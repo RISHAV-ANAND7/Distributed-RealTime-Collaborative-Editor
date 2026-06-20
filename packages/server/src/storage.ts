@@ -1,31 +1,4 @@
-/**
- * storage.ts — SQLite persistence layer
- *
- * Schema:
- *   users                — registered accounts
- *   documents            — document metadata (title, timestamps)
- *   document_snapshots   — periodic compacted CRDT state (one per compaction)
- *   document_ops         — append-only operation log (global monotonic seq)
- *   document_permissions — per-document RBAC
- *
- * Compaction strategy (snapshot compaction):
- * ---------------------------------------------------------------------------
- * Without compaction, replaying history from the beginning requires scanning
- * ALL ops ever written — O(n) I/O that grows without bound. Every
- * COMPACT_INTERVAL ops we write a *snapshot*: the full serialised RGA sequence
- * at that point. Replay then only needs the latest snapshot + ops after its
- * `seq`. Worst-case replay cost is bounded at O(COMPACT_INTERVAL) ops, not
- * O(total ops ever).
- *
- * On startup, loadDocument() returns the latest snapshot if one exists;
- * the caller (index.ts bootstrap) then applies only the delta ops on top.
- *
- * Idempotency:
- * ---------------------------------------------------------------------------
- * Every op carries an `operationId` (UUID assigned by the originating client).
- * Before inserting, we check for duplicates. This prevents the same op from
- * being applied twice when a client reconnects and retransmits its offline queue.
- */
+
 
 import path from 'node:path';
 import sqlite3 from 'sqlite3';
@@ -45,9 +18,7 @@ export async function initStorage(): Promise<Database> {
   const dbPath = process.env.DB_PATH ?? path.resolve(process.cwd(), 'data.db');
   db = await open({ filename: dbPath, driver: sqlite3.Database });
 
-  // Set PRAGMAs before DDL so they apply to this connection from the start.
-  // WAL mode improves concurrent read performance.
-  // foreign_keys must be set per-connection (not persisted in the DB file).
+ 
   await db.exec('PRAGMA journal_mode=WAL');
   await db.exec('PRAGMA synchronous=NORMAL');
   await db.exec('PRAGMA foreign_keys=ON');
@@ -160,9 +131,7 @@ export async function getDocumentMeta(id: string): Promise<{
   return { id: row.id, title: row.title, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
-// ---------------------------------------------------------------------------
-// Compaction snapshots
-// ---------------------------------------------------------------------------
+
 
 export interface SnapshotRow {
   id: number;
@@ -172,10 +141,7 @@ export interface SnapshotRow {
   createdAt: number;
 }
 
-/**
- * Write a compaction snapshot at `seq`.
- * Called by DocumentRoom every COMPACT_INTERVAL ops.
- */
+
 export async function saveCompactionSnapshot(
   docId: string,
   seq: number,
@@ -197,10 +163,7 @@ export async function saveCompactionSnapshot(
   );
 }
 
-/**
- * Load the latest compaction snapshot for a document.
- * Returns null if no snapshot exists (fresh document).
- */
+
 export async function loadLatestSnapshot(docId: string): Promise<SnapshotRow | null> {
   const d = await initStorage();
   const row = await d.get<{
@@ -236,10 +199,7 @@ export interface OpLogEntry {
   appliedAt: number;
 }
 
-/**
- * Append an op to the log. Returns false (without throwing) if the
- * operationId already exists — idempotent by design.
- */
+
 export async function appendOp(
   docId: string,
   operationId: string,
@@ -265,9 +225,7 @@ export async function appendOp(
   }
 }
 
-/**
- * Check whether an operationId has already been applied.
- */
+
 export async function opExists(operationId: string): Promise<boolean> {
   const d = await initStorage();
   const row = await d.get<{ id: number }>(
@@ -277,10 +235,6 @@ export async function opExists(operationId: string): Promise<boolean> {
   return row != null;
 }
 
-/**
- * Return ops for a document with seq > afterSeq, in order.
- * Used for reconnect delta-sync and history replay.
- */
 export async function getOpsAfter(
   docId: string,
   afterSeq = 0,
@@ -342,14 +296,7 @@ export async function getOpStats(docId: string): Promise<{
   };
 }
 
-/**
- * Return evenly-spaced checkpoint ops for version history display.
- *
- * AUDIT FIX: Replaced the fragile `id % (COUNT/limit) = 0` integer-division
- * sampling (which could return 0 rows when COUNT < limit, or uneven samples)
- * with a ROW_NUMBER() OVER approach that gives exactly `limit` evenly-spaced
- * rows regardless of document size.
- */
+
 export async function getVersionCheckpoints(docId: string, limit = 50): Promise<OpLogEntry[]> {
   const d = await initStorage();
   const rows = await d.all<Array<{

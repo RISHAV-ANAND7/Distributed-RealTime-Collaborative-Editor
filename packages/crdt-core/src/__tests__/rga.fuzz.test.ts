@@ -1,19 +1,8 @@
-/**
- * Fuzz & stress tests for the RGA CRDT.
- *
- * These complement the unit tests in rga.test.ts with:
- *  - Randomized concurrent insert/delete across N replicas
- *  - Large paste simulation (bulk insert)
- *  - Reconnect / late-delivery simulation
- *  - Property: all replicas must converge to identical text
- *
- * Run: pnpm test  (or jest directly in packages/crdt-core)
- */
+
 
 import { RGA } from '../rga';
 import type { CRDTOperation } from '../operation';
 
-// Deterministic PRNG (mulberry32) so failures are reproducible.
 function mkRng(seed: number) {
   return () => {
     seed |= 0; seed = seed + 0x6d2b79f5 | 0;
@@ -30,7 +19,6 @@ function randomString(rng: () => number, len: number): string {
   return s;
 }
 
-// Apply all ops from `source` to every replica except source itself.
 function broadcast(replicas: RGA[], ops: CRDTOperation[], source: RGA) {
   for (const r of replicas) {
     if (r === source) continue;
@@ -59,19 +47,17 @@ describe('RGA fuzz — randomized concurrent inserts', () => {
       const replicas = ['A', 'B', 'C'].map((id) => new RGA(id));
       const allOps: { ops: CRDTOperation[]; from: RGA }[] = [];
 
-      // Each replica generates 50 random inserts independently.
       for (const r of replicas) {
         const myOps: CRDTOperation[] = [];
         for (let i = 0; i < 50; i++) {
           const vis = r.visibleLength();
           const idx = Math.floor(rng() * (vis + 1));
-          const ch  = randomString(rng, 1);
+          const ch = randomString(rng, 1);
           myOps.push(r.localInsert(idx, ch));
         }
         allOps.push({ ops: myOps, from: r });
       }
 
-      // Deliver all ops to all other replicas (in original order per source).
       for (const { ops, from } of allOps) broadcast(replicas, ops, from);
 
       expectConvergence(replicas);
@@ -152,7 +138,6 @@ describe('RGA fuzz — large paste (bulk insert)', () => {
     const seedOps: CRDTOperation[] = seed.split('').map((c, i) => a.localInsert(i, c));
     for (const op of seedOps) b.applyRemote(op);
 
-    // B inserts "PASTE" at position 3 while A simultaneously deletes a char.
     const pasteOps: CRDTOperation[] = [];
     'PASTE'.split('').forEach((c, i) => pasteOps.push(b.localInsert(3 + i, c)));
     const delOp = a.localDelete(2);
@@ -173,7 +158,7 @@ describe('RGA fuzz — late delivery / reconnect simulation', () => {
     const liveOps: CRDTOperation[] = [];
     for (let i = 0; i < 30; i++) {
       const len = a.visibleLength();
-      const op  = a.localInsert(Math.floor(rng() * (len + 1)), randomString(rng, 1));
+      const op = a.localInsert(Math.floor(rng() * (len + 1)), randomString(rng, 1));
       liveOps.push(op);
       b.applyRemote(op);
     }
@@ -182,11 +167,10 @@ describe('RGA fuzz — late delivery / reconnect simulation', () => {
     const cOps: CRDTOperation[] = [];
     for (let i = 0; i < 20; i++) {
       const len = c.visibleLength();
-      const op  = c.localInsert(Math.floor(rng() * (len + 1)), randomString(rng, 1));
+      const op = c.localInsert(Math.floor(rng() * (len + 1)), randomString(rng, 1));
       cOps.push(op);
     }
 
-    // C comes back online: delivers its backlog, receives all missed ops.
     for (const op of liveOps) c.applyRemote(op);
     for (const op of cOps) { a.applyRemote(op); b.applyRemote(op); }
 
@@ -208,12 +192,11 @@ describe('RGA fuzz — late delivery / reconnect simulation', () => {
 describe('RGA fuzz — snapshot round-trip', () => {
   test('snapshot + initFromSnapshot preserves text and allows further ops', () => {
     const rng = mkRng(0x9999abcd);
-    const a   = new RGA('A');
+    const a = new RGA('A');
     for (let i = 0; i < 80; i++) {
       const len = a.visibleLength();
       a.localInsert(Math.floor(rng() * (len + 1)), randomString(rng, 1));
     }
-    // Delete ~20% of chars.
     for (let i = 0; i < 16; i++) {
       const len = a.visibleLength();
       if (len > 0) a.localDelete(Math.floor(rng() * len));
@@ -224,8 +207,6 @@ describe('RGA fuzz — snapshot round-trip', () => {
     b.initFromSnapshot(snap);
 
     expect(b.getText()).toBe(a.getText());
-
-    // Both can continue editing and converge.
     const opA = a.localInsert(0, 'X');
     const opB = b.localInsert(0, 'Y');
     a.applyRemote(opB);

@@ -1,4 +1,4 @@
-# Confluence — Distributed Real-Time Collaborative Editor
+# Distributed Real-Time Collaborative Editor
 
 A production-grade collaborative text editor built on a custom **Replicated Growable Array (RGA)** CRDT. Every edit propagates to all peers in real time; the mathematical properties of RGA guarantee all replicas converge to identical text regardless of network conditions or operation order.
 

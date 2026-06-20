@@ -12,25 +12,6 @@ import type {
   RemoteOperationEvent,
 } from './operation.js';
 
-/**
- * Replicated Growable Array (RGA) — an operation-based sequence CRDT.
- *
- * AUDIT FIX #1: spliceInsert was O(n) per insert because it rebuilt the
- * entire indexById map from `rawIndex` to end. For large documents this
- * caused multi-second pauses. We now keep a "version epoch" and reindex
- * lazily on lookup instead.
- *
- * AUDIT FIX #2: findInsertSlot's isDescendantOf was called inside a hot
- * loop and itself walked ancestor chains — worst case O(n²) per remote
- * insert. Replaced with a fast depth-limited walk.
- *
- * AUDIT FIX #3: drainBacklog was O(b²) where b = backlog size. Replaced
- * with a topological sort pass so we drain in one sweep.
- *
- * AUDIT FIX #4: visibleIndexOfRawIndex was a full linear scan on every
- * remote event emission. Added an augmented BIT (Fenwick tree) for O(log n)
- * visible-count queries.
- */
 export class RGA {
   public readonly siteId: string;
   public clock: number;
@@ -38,15 +19,11 @@ export class RGA {
   private sequence: CRDTChar[] = [];
   private indexById: Map<string, number> = new Map();
 
-  /** Inserts waiting on a parent that has not yet been received. */
   private insertBacklog: InsertOp[] = [];
-  /** Backlog indexed by parentId key for O(1) fan-out during drain. */
   private backlogByParent: Map<string, InsertOp[]> = new Map();
 
-  /** Deletes targeting an as-yet-unseen char. */
   private tombstonedIds: Set<string> = new Set();
 
-  /** Fenwick tree over `sequence` for O(log n) visible-count prefix queries. */
   private fenwick: number[] = [];
 
   constructor(siteId: string, clock: number = 0) {
@@ -274,14 +251,7 @@ export class RGA {
     return i;
   }
 
-  /**
-   * Returns true if `char` is a descendant of `ancestorId`.
-   *
-   * Fix: removed the MAX_HOPS=64 limit which caused convergence failure on
-   * long paste chains (all chars share ROOT as parent, chain depth = paste
-   * length). The walk is bounded by the DAG height (never cycles) so
-   * removing the limit is safe. A visited-set guards against malformed data.
-   */
+
   private isDescendantOf(char: CRDTChar, ancestorId: CharId | null): boolean {
     // Every node is a descendant of ROOT (null).
     if (ancestorId === null) return true;
@@ -299,21 +269,14 @@ export class RGA {
     return false;
   }
 
-  /**
-   * AUDIT FIX #1: O(n) index rebuild (unavoidable due to splice shifting).
-   *
-   * AUDIT FIX (Fenwick rebuild): The previous rebuild called fenwickUpdate()
-   * for every non-tombstoned element, making construction O(n log n). We now
-   * use the standard O(n) bottom-up Fenwick construction instead.
-   */
+
   private spliceInsert(rawIndex: number, char: CRDTChar): void {
     this.sequence.splice(rawIndex, 0, char);
     // Rebuild indexById from rawIndex onwards (splice shifts all later entries).
     for (let i = rawIndex; i < this.sequence.length; i++) {
       this.indexById.set(charIdKey(this.sequence[i].id), i);
     }
-    // O(n) Fenwick tree construction (bottom-up).
-    // Standard algorithm: propagate each cell's value to its parent in one pass.
+
     const n = this.sequence.length;
     this.fenwick = new Array(n + 1).fill(0);
     for (let i = 0; i < n; i++) {
@@ -347,7 +310,6 @@ export class RGA {
     }
   }
 
-  /** Returns the count of visible chars in sequence[0..rawIndex-1] (exclusive). */
   private fenwickQuery(rawIndex: number): number {
     let sum = 0;
     for (let i = rawIndex; i > 0; i -= i & -i) {

@@ -1,6 +1,4 @@
-/**
- * index.ts — HTTP + WebSocket server
- */
+
 
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -51,9 +49,7 @@ import {
   relayEnabled,
 } from './relay.js';
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
+
 
 const PORT = Number(process.env.PORT ?? 3001);
 const ALLOWED_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:5173';
@@ -62,9 +58,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
   console.warn('[server] WARNING: CORS_ORIGIN not set in production — defaulting to localhost');
 }
 
-// ---------------------------------------------------------------------------
-// Express app
-// ---------------------------------------------------------------------------
+
 
 const app = express();
 
@@ -83,13 +77,10 @@ const authLimiter = rateLimit({
   message: { error: 'Too many auth requests — please try again later' },
 });
 
-// ---------------------------------------------------------------------------
-// State — db initialised in bootstrap() before any requests are served
-// ---------------------------------------------------------------------------
+
 
 const rooms = new Map<string, DocumentRoom>();
-// Lazy getter: always reads the live db reference after bootstrap().
-// This pattern replaces the previous `null as any` anti-pattern.
+
 let _db: Awaited<ReturnType<typeof initStorage>> | null = null;
 const getDb = () => {
   if (!_db) throw new Error('Storage not initialised');
@@ -99,16 +90,14 @@ const getDb = () => {
 async function getOrCreateRoom(id: string): Promise<DocumentRoom> {
   let room = rooms.get(id);
   if (room) return room;
-  // Minimal fresh room — no snapshot available (new doc created mid-session).
+
   room = new DocumentRoom(id);
   rooms.set(id, room);
   registerRoom(id, room);
   return room;
 }
 
-// ---------------------------------------------------------------------------
-// Bootstrap
-// ---------------------------------------------------------------------------
+
 
 async function bootstrap(): Promise<void> {
   _db = await initStorage();
@@ -134,17 +123,13 @@ async function bootstrap(): Promise<void> {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Health
-// ---------------------------------------------------------------------------
+
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, relay: relayEnabled, ts: Date.now() });
 });
 
-// ---------------------------------------------------------------------------
-// Auth routes
-// ---------------------------------------------------------------------------
+
 
 app.post('/auth/register', authLimiter, async (req, res) => {
   const { username, password } = req.body ?? {};
@@ -154,7 +139,7 @@ app.post('/auth/register', authLimiter, async (req, res) => {
   if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
     return void res.status(400).json({ error: 'username may only contain letters, numbers, _ and -' });
   }
-  // Enforce max length to prevent PBKDF2 CPU-exhaustion via huge inputs.
+
   if (typeof password !== 'string' || password.length < 8 || password.length > 1024) {
     return void res.status(400).json({ error: 'password must be 8–1024 characters' });
   }
@@ -187,27 +172,14 @@ app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id: req.user!.sub, username: req.user!.username } });
 });
 
-/**
- * POST /auth/ws-ticket
- * Authenticated users call this endpoint to get a short-lived (30 s) opaque
- * ticket. The ticket is then passed as ?ticket= in the WebSocket URL instead
- * of the raw JWT — preventing the JWT from appearing in server access logs,
- * browser history, and nginx proxy logs.
- */
+
 app.post('/auth/ws-ticket', requireAuth, (req, res) => {
   const ticket = createWsTicket(req.user!);
   res.json({ ticket, expiresInMs: 30_000 });
 });
 
-// ---------------------------------------------------------------------------
-// Document routes
-// ---------------------------------------------------------------------------
 
-/**
- * Issue 3 FIX: /documents returns ONLY documents the authenticated user can access.
- * Unauthenticated requests receive an empty list (or 401 — choose per product needs;
- * here we return 401 to enforce login before listing).
- */
+
 app.get('/documents', requireAuth, async (req, res) => {
   const docIds = await getDocumentIdsForUser(getDb(), req.user!.sub);
   const list = docIds
@@ -241,10 +213,7 @@ app.get('/documents/:id', requireAuth, async (req, res) => {
   res.json({ ...room.toSummary(), text: room.rga.getText() });
 });
 
-/**
- * Issue 2 FIX: requireDocRole uses a lazy getter (no null as any).
- * Owner-only routes correctly validate the owner role at request time.
- */
+
 app.patch(
   '/documents/:id',
   requireAuth,
@@ -273,9 +242,7 @@ app.delete(
   },
 );
 
-// ---------------------------------------------------------------------------
-// Permission management
-// ---------------------------------------------------------------------------
+
 
 app.get('/documents/:id/members', requireAuth, async (req, res) => {
   const role = await getUserRole(getDb(), req.params['id'], req.user!.sub);
@@ -311,15 +278,7 @@ app.delete(
   },
 );
 
-// ---------------------------------------------------------------------------
-// User lookup (for share / invite by username)
-// ---------------------------------------------------------------------------
 
-/**
- * GET /users/lookup?username=xxx
- * Any authenticated user can look up whether a username exists.
- * Returns { id, username } — no sensitive data exposed.
- */
 app.get('/users/lookup', requireAuth, async (req, res) => {
   const username = (req.query['username'] as string | undefined)?.trim();
   if (!username || username.length < 1) {
@@ -330,12 +289,7 @@ app.get('/users/lookup', requireAuth, async (req, res) => {
   res.json({ id: user.id, username: user.username });
 });
 
-/**
- * POST /documents/:id/invite
- * Owner-only shortcut: invite a collaborator by username in one step.
- * Body: { username: string, role: 'editor' | 'viewer' }
- * Resolves the username to a userId, then grants the permission.
- */
+
 app.post(
   '/documents/:id/invite',
   requireAuth,
@@ -360,11 +314,7 @@ app.post(
   },
 );
 
-// ---------------------------------------------------------------------------
-// Waiting room: approve / reject / list pending
-// ---------------------------------------------------------------------------
 
-/** GET /documents/:id/pending — list users waiting in the waiting room */
 app.get(
   '/documents/:id/pending',
   requireAuth,
@@ -376,7 +326,7 @@ app.get(
   },
 );
 
-/** POST /documents/:id/approve — owner approves a waiting user */
+
 app.post(
   '/documents/:id/approve',
   requireAuth,
@@ -389,11 +339,8 @@ app.post(
     if (!['editor', 'viewer'].includes(role)) {
       return void res.status(400).json({ error: 'role must be editor or viewer' });
     }
-    // Persist the permission in the database first.
-    // If the user has already disconnected the in-memory wakeup is a no-op,
-    // but they will reconnect with the correct role from the DB.
+
     await grantPermission(getDb(), req.params['id'], userId, role as Role);
-    // Wake up the pending WebSocket client (if still connected).
     const room = rooms.get(req.params['id']);
     if (room) {
       await room.approvePending(userId, role as 'editor' | 'viewer');
@@ -402,7 +349,6 @@ app.post(
   },
 );
 
-/** POST /documents/:id/reject — owner rejects a waiting user */
 app.post(
   '/documents/:id/reject',
   requireAuth,
@@ -420,9 +366,7 @@ app.post(
   },
 );
 
-// ---------------------------------------------------------------------------
-// Version history
-// ---------------------------------------------------------------------------
+
 
 app.get('/documents/:id/history', requireAuth, async (req, res) => {
   const role = await getUserRole(getDb(), req.params['id'], req.user!.sub);
@@ -443,9 +387,7 @@ app.get('/documents/:id/history/replay', requireAuth, async (req, res) => {
   res.json({ ops, count: ops.length });
 });
 
-// ---------------------------------------------------------------------------
-// WebSocket
-// ---------------------------------------------------------------------------
+
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
@@ -473,23 +415,23 @@ wss.on('connection', async (socket: WebSocket, req: http.IncomingMessage, docId:
   if (userId) {
     role = await getUserRole(getDb(), docId, userId);
     if (!role) {
-      // No permission → waiting room instead of rejection
+
       role = 'pending' as Role;
     }
   } else {
-    // Not authenticated at all → close
+
     socket.send(JSON.stringify({ type: 'error', message: 'Please login first' }));
     socket.close(1008, 'Not authenticated');
     return;
   }
 
-  // Reconnect reconciliation: client sends lastSeq query param.
+
   const params = new URL(url, 'http://localhost').searchParams;
   const lastSeq = Math.max(0, Number(params.get('lastSeq') ?? 0));
 
   const room = await getOrCreateRoom(docId);
   const authUsername = jwtPayload?.username ?? null;
-  // Sanitize displayName: cap length and strip control characters.
+
   const rawDisplayName = params.get('name') ?? null;
   const displayName = rawDisplayName
     ? rawDisplayName.replace(/[\x00-\x1f]/g, '').slice(0, 64)
@@ -521,9 +463,7 @@ wss.on('connection', async (socket: WebSocket, req: http.IncomingMessage, docId:
   });
 });
 
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
+
 
 bootstrap().then(() => {
   server.listen(PORT, () => {
@@ -534,22 +474,20 @@ bootstrap().then(() => {
   process.exit(1);
 });
 
-// ---------------------------------------------------------------------------
-// Graceful shutdown
-// ---------------------------------------------------------------------------
+
 
 async function shutdown(signal: string): Promise<void> {
   console.log(`[server] Received ${signal} — shutting down gracefully…`);
   server.close(async () => {
-    // Allow the debounced queuePersist callbacks (500 ms) to fire.
+
     await new Promise<void>((r) => setTimeout(r, 600));
-    await import('./relay.js').then((m) => m.closeRelay()).catch(() => {});
+    await import('./relay.js').then((m) => m.closeRelay()).catch(() => { });
     console.log('[server] Shutdown complete.');
     process.exit(0);
   });
-  // Force-exit after 10 s if something hangs.
+
   setTimeout(() => { console.error('[server] Forced exit after timeout.'); process.exit(1); }, 10_000).unref();
 }
 
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('SIGINT',  () => void shutdown('SIGINT'));
+process.on('SIGINT', () => void shutdown('SIGINT'));

@@ -1,14 +1,4 @@
-/**
- * auth.ts — JWT-based authentication middleware
- *
- * Tokens are HS256 JWTs signed with JWT_SECRET (env var, required in production).
- * Each token payload: { sub: userId, username: string, iat, exp }
- *
- * Access tokens expire in 24 hours. No refresh tokens — keep it simple.
- *
- * PBKDF2 (100 000 iterations, SHA-256, 32-byte key) is used for password
- * hashing. This is intentionally slow to resist offline brute-force.
- */
+
 
 import { createHmac, pbkdf2, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -29,7 +19,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   process.exit(1);
 }
 if (process.env.NODE_ENV === 'production' && process.env.JWT_SECRET &&
-    process.env.JWT_SECRET.length < 32) {
+  process.env.JWT_SECRET.length < 32) {
   console.error('[auth] FATAL: JWT_SECRET must be at least 32 characters in production.');
   process.exit(1);
 }
@@ -79,17 +69,10 @@ export function verifyToken(token: string): JwtPayload | null {
 // Express middleware
 // ---------------------------------------------------------------------------
 
-/**
- * AuthRequest is kept for backwards compatibility with callers that
- * explicitly type req as AuthRequest. With the Express namespace augmentation
- * in `types/express.d.ts`, the plain `Request` type already carries `user`.
- */
+
 export type AuthRequest = Request;
 
-/**
- * requireAuth — 401 if no valid JWT present.
- * Token is read from Authorization: Bearer <token> header.
- */
+
 export const requireAuth: RequestHandler = (req, res, next) => {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
@@ -106,10 +89,6 @@ export const requireAuth: RequestHandler = (req, res, next) => {
   next();
 };
 
-/**
- * optionalAuth — sets req.user if a valid token is present; never 401s.
- * Used for endpoints that behave differently for authenticated vs anonymous users.
- */
 export const optionalAuth: RequestHandler = (req, res, next) => {
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
@@ -120,20 +99,7 @@ export const optionalAuth: RequestHandler = (req, res, next) => {
   next();
 };
 
-/**
- * WebSocket one-time ticket system.
- *
- * Problem: browsers cannot send custom headers on WebSocket upgrades.
- * The previous solution passed the JWT as a ?token= query param, which
- * caused the token to appear in server/proxy access logs and browser history.
- *
- * Solution: clients POST to /auth/ws-ticket to get a short-lived (30 s)
- * opaque ticket UUID. They then pass ?ticket= (not ?token=) in the WS URL.
- * The server consumes (deletes) the ticket on the first WS upgrade, so each
- * ticket is valid exactly once. Expired or unknown tickets are rejected.
- */
 
-/** TTL for one-time WS tickets (ms). */
 const WS_TICKET_TTL_MS = 30_000;
 
 interface TicketEntry {
@@ -143,7 +109,6 @@ interface TicketEntry {
 
 const wsTickets = new Map<string, TicketEntry>();
 
-/** Remove expired tickets lazily to bound map growth. */
 function pruneTickets(): void {
   const now = Date.now();
   for (const [k, v] of wsTickets) {
@@ -151,10 +116,6 @@ function pruneTickets(): void {
   }
 }
 
-/**
- * Issue a one-time ticket for an authenticated user.
- * Returns the ticket string (UUID) to be passed as ?ticket= in the WS URL.
- */
 export function createWsTicket(payload: JwtPayload): string {
   pruneTickets();
   const ticket = randomBytes(16).toString('hex');
@@ -162,14 +123,6 @@ export function createWsTicket(payload: JwtPayload): string {
   return ticket;
 }
 
-/**
- * extractWsToken — resolves the identity for a WebSocket upgrade request.
- *
- * Priority:
- *   1. ?ticket= — one-time ticket (preferred; avoids JWT in URL/logs).
- *   2. ?token=  — raw JWT (legacy fallback; still accepted so existing
- *                 clients / integrations continue working).
- */
 export function extractWsToken(url: string): JwtPayload | null {
   try {
     const parsed = new URL(url, 'http://localhost');

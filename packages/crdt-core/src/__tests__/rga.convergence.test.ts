@@ -1,20 +1,4 @@
-/**
- * rga.convergence.test.ts — convergence proof tests
- *
- * These tests assert the core CRDT guarantee:
- *   For any set of operations applied in any order across any number of
- *   replicas, all replicas must converge to identical text.
- *
- * Test categories:
- *   1. Concurrent random insert/delete — randomized op interleaving
- *   2. Multi-client concurrent edits  — 5 clients, simultaneous ops
- *   3. Offline-then-reconnect         — partition, independent edits, merge
- *   4. Duplicate op idempotency       — same op applied N times
- *   5. Reconnect delta reconciliation — partial op log replay
- *   6. Large concurrent paste         — bulk inserts from multiple replicas
- *   7. Delete-before-insert (backlog) — delete arrives before the target char
- *   8. Tombstone stability            — heavy delete-heavy convergence
- */
+
 
 import { RGA } from '../rga';
 import type { CRDTOperation } from '../operation';
@@ -23,7 +7,6 @@ import type { CRDTOperation } from '../operation';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Deterministic PRNG (mulberry32) for reproducible failures. */
 function mkRng(seed: number) {
   return (): number => {
     seed |= 0; seed = seed + 0x6d2b79f5 | 0;
@@ -38,14 +21,12 @@ function randomChar(rng: () => number): string {
   return chars[Math.floor(rng() * chars.length)];
 }
 
-/** Apply all ops to every replica in the given order. */
 function applyAll(replicas: RGA[], ops: CRDTOperation[]): void {
   for (const r of replicas) {
     for (const op of ops) r.applyRemote(op);
   }
 }
 
-/** Assert every replica has the same text. */
 function assertConvergence(replicas: RGA[], label?: string): void {
   const texts = replicas.map((r) => r.getText());
   for (let i = 1; i < texts.length; i++) {
@@ -84,7 +65,6 @@ describe('Convergence: random concurrent inserts + deletes', () => {
         }
       }
 
-      // Cross-apply: every replica receives every other replica's ops.
       for (let ri = 0; ri < replicas.length; ri++) {
         for (let rj = 0; rj < replicas.length; rj++) {
           if (ri === rj) continue;
@@ -117,7 +97,6 @@ describe('Convergence: 5 concurrent clients', () => {
       }
     }
 
-    // Each replica receives ops from all other replicas.
     for (const { from, op } of allOps) {
       for (let ri = 0; ri < replicas.length; ri++) {
         if (ri !== from) replicas[ri].applyRemote(op);
@@ -138,7 +117,6 @@ describe('Convergence: offline partition then reconnect', () => {
   test('partition into 2 groups, independent edits, then full merge converges', () => {
     const rng = mkRng(0xbeef);
 
-    // Shared initial state: "hello"
     const origin = new RGA('origin');
     const initialOps: CRDTOperation[] = [];
     'hello'.split('').forEach((ch, i) => initialOps.push(origin.localInsert(i, ch)));
@@ -151,7 +129,6 @@ describe('Convergence: offline partition then reconnect', () => {
     });
     expect(A.getText()).toBe('hello');
 
-    // -- PARTITION: A+B are online together, C goes offline --
 
     const ab_ops: CRDTOperation[] = [];
     // A inserts " world" at end.
@@ -166,12 +143,10 @@ describe('Convergence: offline partition then reconnect', () => {
     ab_ops.push(b_del!);
     applyAll([A], [b_del!]);
 
-    // -- C was offline, does independent edits --
     const c_ops: CRDTOperation[] = [];
-    c_ops.push(C.localInsert(5, '!')); // "hello!"
-    c_ops.push(C.localInsert(0, 'X')); // "Xhello!"
+    c_ops.push(C.localInsert(5, '!'));
+    c_ops.push(C.localInsert(0, 'X'));
 
-    // -- RECONNECT: all replicas exchange all ops --
     applyAll([A, B], c_ops);
     applyAll([C], ab_ops);
 
@@ -188,7 +163,6 @@ describe('Convergence: offline partition then reconnect', () => {
 
     // B receives ops once.
     applyAll([B], ops);
-    // B receives the same ops again (simulating client retransmit after reconnect).
     applyAll([B], ops);
 
     expect(A.getText()).toBe(B.getText());
@@ -232,7 +206,6 @@ describe('Idempotency: duplicate ops', () => {
     const rng = mkRng(42);
     const replicas = [new RGA('A'), new RGA('B'), new RGA('C')];
 
-    // All three insert at index 0 concurrently.
     const ops = replicas.map((r) => r.localInsert(0, randomChar(rng)));
 
     // Apply all to all replicas (including double-applying own ops).
@@ -252,7 +225,6 @@ describe('Idempotency: duplicate ops', () => {
 
 describe('Reconnect delta: partial replay from seq', () => {
   test('client receiving only delta ops catches up to full-sync state', () => {
-    // Simulate server state: 10 ops applied.
     const server = new RGA('server');
     const allOps: CRDTOperation[] = [];
     for (let i = 0; i < 10; i++) allOps.push(server.localInsert(i, String.fromCharCode(97 + i)));
@@ -281,7 +253,6 @@ describe('Convergence: large concurrent paste', () => {
     const aOps: CRDTOperation[] = [];
     const bOps: CRDTOperation[] = [];
 
-    // A pastes 200 chars at position 0.
     for (let i = 0; i < 200; i++) aOps.push(A.localInsert(i, randomChar(rng)));
     // B pastes 200 chars at position 0 concurrently.
     for (let i = 0; i < 200; i++) bOps.push(B.localInsert(i, randomChar(rng)));
@@ -309,7 +280,6 @@ describe('Out-of-order delivery: delete arrives before insert target', () => {
     const delOp = A.localDelete(0);
     expect(delOp).not.toBeNull();
 
-    // B receives delete FIRST (char not yet known → backlog).
     B.applyRemote(delOp!);
     // B then receives the insert.
     B.applyRemote(insOp);
@@ -329,7 +299,6 @@ describe('Out-of-order delivery: delete arrives before insert target', () => {
     ops.push(A.localInsert(3, 'd'));
     ops.push(A.localInsert(4, 'e'));
 
-    // B receives in reverse order (e, d, c, b, a).
     for (const op of [...ops].reverse()) B.applyRemote(op);
 
     expect(B.getText()).toBe('abcde');
@@ -347,14 +316,12 @@ describe('Convergence: heavy concurrent delete', () => {
     const A = new RGA('A');
     const origin = new RGA('origin');
 
-    // Insert 20 chars.
     const insOps: CRDTOperation[] = [];
     for (let i = 0; i < 20; i++) insOps.push(origin.localInsert(i, randomChar(rng)));
     applyAll([A], insOps);
     const B = new RGA('B');
     applyAll([B], insOps);
 
-    // A deletes chars 0–9.
     const aDelOps: CRDTOperation[] = [];
     for (let i = 9; i >= 0; i--) {
       const op = A.localDelete(i);
@@ -379,7 +346,6 @@ describe('Convergence: heavy concurrent delete', () => {
     const rng = mkRng(0x5eed);
     const [A, B, C] = ['A', 'B', 'C'].map((id) => new RGA(id));
 
-    // A inserts 10 chars.
     const insOps: CRDTOperation[] = [];
     for (let i = 0; i < 10; i++) insOps.push(A.localInsert(i, randomChar(rng)));
     applyAll([B], insOps);
@@ -394,7 +360,6 @@ describe('Convergence: heavy concurrent delete', () => {
 
     // C receives all ops in shuffled order.
     const combined = [...insOps, ...delOps];
-    // Fisher-Yates shuffle.
     for (let i = combined.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
       [combined[i], combined[j]] = [combined[j], combined[i]];

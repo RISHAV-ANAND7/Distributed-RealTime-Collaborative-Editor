@@ -1,37 +1,4 @@
-/**
- * room.ts — in-memory collaborative document room
- *
- * Fixes applied in this version:
- *
- * 1. TRUE MULTI-NODE CRDT CONSISTENCY
- *    broadcastFromRelay() now applies the op to the local RGA *and* broadcasts
- *    to local clients. Previously it only forwarded the raw payload, so this
- *    instance's RGA diverged from peers — new clients joining would receive a
- *    stale snapshot and miss all relayed ops.
- *
- * 2. IDEMPOTENCY / DUPLICATE-OP HANDLING
- *    Every op carries an `operationId` (set by the originating client or
- *    generated server-side). The op log table has a UNIQUE constraint on it.
- *    appliedOps (in-memory Set) deduplicates ops within a session before
- *    touching the RGA. Duplicate ops are silently dropped.
- *
- * 3. RECONNECT RECONCILIATION (delta sync)
- *    addClient() accepts an optional `lastSeq` from the reconnecting client.
- *    If > 0, instead of a full snapshot we load missing ops from the op log
- *    and send them as individual op messages — bandwidth-efficient resync.
- *
- * 4. SNAPSHOT COMPACTION
- *    Every COMPACT_INTERVAL ops, a compaction snapshot is written. On startup,
- *    only ops *after* the latest snapshot need to be replayed. This bounds
- *    replay cost to O(COMPACT_INTERVAL) regardless of document lifetime.
- *
- * 5. VIEWER ENFORCEMENT
- *    Clients with viewer role cannot send insert/delete ops.
- *
- * 6. OP LOG ATTRIBUTION
- *    Ops relayed from Redis peers are also appended to the local op log
- *    (with the correct siteId) so every instance has a complete audit trail.
- */
+
 
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
@@ -68,13 +35,12 @@ export interface AttachedSocket {
   socket: WebSocket;
   siteId?: string;
   userId: string | null;
-  username: string | null;   // authenticated display name from JWT
-  displayName: string | null; // per-session nickname chosen in JoinModal
+  username: string | null;
+  displayName: string | null;
   role: Role | null;
 }
 
-// Wire format: ops may carry an optional client-assigned operationId.
-// Using a type intersection so operationId and id are always accessible.
+
 type WireOp = CRDTOperation & {
   operationId?: string;
   id: { siteId: string; clock: number };
@@ -87,11 +53,7 @@ export class DocumentRoom {
   public lastModifiedAt: number;
   public rga: RGA;
 
-  /**
-   * Global monotonic sequence counter for this room.
-   * Incremented on every successfully applied op.
-   * Clients use this for delta-sync on reconnect.
-   */
+
   public seq: number;
 
   private clients: Set<AttachedSocket> = new Set();
@@ -99,15 +61,7 @@ export class DocumentRoom {
   private persistQueued = false;
   private opsSinceCompact = 0;
 
-  /**
-   * In-memory idempotency set: operationIds applied this session.
-   * Guards against duplicates from client offline queues and Redis re-delivery.
-   *
-   * AUDIT FIX: capped at MAX_APPLIED_OPS to prevent unbounded memory growth
-   * on long-running rooms. Sets preserve insertion order, so we evict the
-   * oldest entry once the cap is exceeded. The DB's UNIQUE constraint on
-   * operation_id remains the authoritative dedup guarantee.
-   */
+
   private appliedOps: Set<string> = new Set();
   private static readonly MAX_APPLIED_OPS = 10_000;
 
@@ -132,15 +86,7 @@ export class DocumentRoom {
   get clientCount(): number { return this.clients.size; }
   get pendingCount(): number { return this.pendingClients.size; }
 
-  // -------------------------------------------------------------------------
-  // Client lifecycle
-  // -------------------------------------------------------------------------
 
-  /**
-   * Add a client. If lastSeq > 0 and we have the delta in the op log,
-   * send only the missing ops (reconnect reconciliation) instead of a full
-   * snapshot. Falls back to full sync if delta is unavailable.
-   */
   async addClient(
     socket: WebSocket,
     userId: string | null,
@@ -151,7 +97,6 @@ export class DocumentRoom {
   ): Promise<AttachedSocket> {
     const attached: AttachedSocket = { socket, userId, username, displayName, role };
 
-    // ── Waiting room: pending users don't get document content ──
     if (role === 'pending') {
       this.pendingClients.add(attached);
       socket.send(JSON.stringify({ type: 'waiting', message: 'Waiting for the document owner to approve your request.' }));
@@ -189,7 +134,6 @@ export class DocumentRoom {
       }
     }
 
-    // Full sync (first connect or delta unavailable).
     socket.send(JSON.stringify({
       type: 'sync',
       sequence: this.rga.getSequence(),
@@ -215,14 +159,6 @@ export class DocumentRoom {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Waiting room: approve / reject pending users
-  // -------------------------------------------------------------------------
-
-  /**
-   * Approve a pending user: move them from pendingClients → clients,
-   * upgrade their role, and send them the full document sync.
-   */
   async approvePending(userId: string, newRole: 'editor' | 'viewer'): Promise<boolean> {
     for (const pending of this.pendingClients) {
       if (pending.userId === userId) {
@@ -249,9 +185,7 @@ export class DocumentRoom {
     return false;
   }
 
-  /**
-   * Reject a pending user: send them a rejected message and close the socket.
-   */
+
   rejectPending(userId: string): boolean {
     for (const pending of this.pendingClients) {
       if (pending.userId === userId) {
@@ -264,7 +198,6 @@ export class DocumentRoom {
     return false;
   }
 
-  /** Return info about all currently pending users. */
   getPendingUsers(): Array<{ userId: string; username: string; displayName: string }> {
     const result: Array<{ userId: string; username: string; displayName: string }> = [];
     for (const p of this.pendingClients) {
@@ -315,7 +248,7 @@ export class DocumentRoom {
     this.broadcast(payload, from);
 
     // Append to op log (non-blocking; idempotent via UNIQUE constraint).
-    const opForLog = wireOp as unknown as { type: 'insert' | 'delete'; [k: string]: unknown };
+    const opForLog = wireOp as unknown as { type: 'insert' | 'delete';[k: string]: unknown };
     appendOp(this.id, operationId, opForLog, from.siteId ?? this.rga.siteId, this.seq, from.userId ?? undefined)
       .catch((err) => console.error(`[room:${this.id}] op log write failed:`, err));
 
@@ -338,9 +271,7 @@ export class DocumentRoom {
     if (typeof msg.siteId !== 'string') return;
     if (typeof msg.position !== 'number' || msg.position < 0) return;
     from.siteId = msg.siteId;
-    // Sanitize user-controlled fields before broadcasting to all clients.
-    // name is used in CSS content: "..." on the client — strip control chars.
-    // color must be a valid hex colour to prevent CSS property injection.
+
     const safeName = typeof msg.name === 'string'
       ? msg.name.replace(/[\x00-\x1f"\\]/g, '').slice(0, 64)
       : undefined;
@@ -352,7 +283,7 @@ export class DocumentRoom {
       siteId: msg.siteId,
       position: msg.position,
       typing: !!msg.typing,
-      ...(safeName  !== undefined && { name:  safeName  }),
+      ...(safeName !== undefined && { name: safeName }),
       ...(safeColor !== undefined && { color: safeColor }),
     };
     this.broadcast(JSON.stringify(sanitized), from);
@@ -371,22 +302,14 @@ export class DocumentRoom {
     const sanitized: HeartbeatMessage = {
       type: 'heartbeat',
       siteId: msg.siteId,
-      ...(safeName  !== undefined && { name:  safeName  }),
+      ...(safeName !== undefined && { name: safeName }),
       ...(safeColor !== undefined && { color: safeColor }),
     };
     // Broadcast heartbeat so all peers can refresh lastSeen
     this.broadcast(JSON.stringify(sanitized), from);
   }
 
-  /**
-   * Called by the Redis subscriber when a peer instance publishes an op.
-   *
-   * Fix for multi-node consistency: we now APPLY the op to the local RGA
-   * so this instance's state stays in sync with peers. Previously we only
-   * forwarded the raw payload — this caused divergence: if Client-B reconnects
-   * to Instance-2, it would get Instance-2's stale RGA snapshot (missing all
-   * ops that came via relay from Instance-1).
-   */
+
   applyFromRelay(raw: string): void {
     try {
       const { op, seq: remoteSeq }: { op: WireOp; seq: number } = JSON.parse(raw);
@@ -410,7 +333,7 @@ export class DocumentRoom {
       this.queuePersist();
 
       // Append to local op log for audit trail and reconnect delta.
-      const opForLog = op as unknown as { type: 'insert' | 'delete'; [k: string]: unknown };
+      const opForLog = op as unknown as { type: 'insert' | 'delete';[k: string]: unknown };
       appendOp(this.id, operationId, opForLog, op.id?.siteId ?? 'relay', this.seq)
         .catch(() => { /* silently ignore duplicates */ });
 
@@ -419,7 +342,7 @@ export class DocumentRoom {
 
       if (this.opsSinceCompact >= COMPACT_INTERVAL) {
         this.opsSinceCompact = 0;
-        this.writeCompactionSnapshot().catch(() => {});
+        this.writeCompactionSnapshot().catch(() => { });
       }
     } catch {
       // Malformed relay message — ignore.
@@ -491,11 +414,7 @@ export class DocumentRoom {
     };
   }
 
-  /**
-   * Reconstruct a room from the latest compaction snapshot + delta ops.
-   * This is used at startup to efficiently restore document state without
-   * replaying the entire op log from op #1.
-   */
+
   static async restore(id: string, meta: {
     title: string; createdAt: number; updatedAt: number;
   }): Promise<DocumentRoom> {
